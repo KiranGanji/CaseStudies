@@ -1,0 +1,457 @@
+---
+title: 'Singulariti: Case Study'
+author: "Kiran Ganji"
+date: "November 17, 2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(data.table)
+library(ggplot2)
+library(grid)
+library(knitr)
+library(car)
+library(MASS)
+library(caTools)#For Splitting the data
+library(caret)#For Confusion Matrix
+library(xgboost)
+library(corrplot)
+library(plotly)
+setwd("E:/Work/Singulariti/FinalRMD")
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## DataSet and Objectives:
+
+### Data
+
+* Given dataset is the data containing different physiochemical properties of 1599 wine samples
+* The physiochemical properties include fixed acidity, volatile acidity, citric acid, residual sugar, chlorides, free sulfur dioxide, total sulfur dioxide, density, pH, sulphates, alcohol and quality.
+
+### Objectives
+
+* Investigate how Alcohol, Density and Residual sugar affect Quality of Wine
+* Construct a model to predict the Quality score for a sample of red wine given the above attributes.
+
+## Contents
+
+The Document is structured in the following way:
+
+* Summary of the Data
+* Distributions of the Data
+* Box plots within each variable based on quality (DV)
+* Plots to investigate the relation between Alchohol, Density and Residual sugar with Quality of Wine
+* Modeling with quality as a Continuous variable
+* Modeling with quality as Categorical Variable
+* Conclusion
+
+
+
+```{r Functions, include= FALSE}
+varlist <- function (df=NULL,type=c("numeric","factor","character"), pattern="", exclude=NULL) {
+  vars <- character(0)
+  if (any(type %in% "numeric")) {
+    vars <- c(vars,names(df)[sapply(df,is.numeric)])
+  }
+  if (any(type %in% "factor")) {
+    vars <- c(vars,names(df)[sapply(df,is.factor)])
+  }  
+  if (any(type %in% "character")) {
+    vars <- c(vars,names(df)[sapply(df,is.character)])
+  }  
+  vars[(!vars %in% exclude) & grepl(vars,pattern=pattern)]
+}
+
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+  
+  numPlots = length(plots)
+  
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                     ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+  
+  if (numPlots==1) {
+    print(plots[[1]])
+    
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+    
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+      
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+
+splitdf <- function(dataframe, seed=NULL, perc) {
+  if (!is.null(seed)) set.seed(seed)
+  index <- 1:nrow(dataframe)
+  trainindex <- sample(index, trunc(length(index)* perc))#Change the percentage here
+  trainset <- dataframe[trainindex, ]
+  testset <- dataframe[-trainindex, ]
+  return(list(trainset=trainset,testset=testset))
+}
+```
+
+
+```{r Maincode, echo=FALSE, warning=FALSE, message=FALSE}
+DataMain <- fread("winequality-red.csv")
+
+NumVar <- varlist(DataMain,type="numeric")
+FacVars <- varlist(DataMain,type="factor")
+```
+
+## Summary of the Data
+
+The summary of the data is given below:
+
+```{r, echo=FALSE, results="asis"}
+NumVarsDf <- as.data.frame(NumVar)
+k <- 1
+for(i in NumVar){
+  u <- summary(DataMain[,get(i),])
+  l <- 1
+  for(j in names(u)){
+    NumVarsDf[k,j] <- u[[l]]
+    l <- l+1
+  }
+  NumVarsDf[k,"Unique_Values"] <- length(unique(DataMain[,get(i),]))
+  k <- k+1
+}
+
+kable(NumVarsDf, caption = "Stats",digits = 2)
+```
+
+## Distributions of the Data
+
+### Histograms
+
+All the variables are numerical in nature: Below given are the distributions of each of the variables. As shown below the Y-Axis indicates the count (frequency) and X-Axis indicates the variable range. Few Observations:
+
+* Chlorides, Residual Sugar seem to have skewed distributions.
+* Total Sulpfur-di-oxide and Sulphates seem to contain a few outliers (They might be either outliers or influential points)
+* Quality takes only integer values and most of the wines are having a quality score of 5 or 6
+
+```{r Main Plot, echo=FALSE, warning=FALSE, message=FALSE, fig.width=10, fig.height=5,}
+Variables <- c("h1","h2","h3","h4","h5","h6","h7","h8","h9","h10","h11","h12")
+for(i in 1:length(NumVar)){
+  eval(parse(text = paste0(Variables[i]," <- ggplot(DataMain, aes(x=",NumVar[i],"))+ geom_histogram()")))  
+}
+
+multiplot(h1, h2, h3, h4,h5,h6, cols=3)
+multiplot(h7, h8, h9, h10,h11,h12, cols=3)
+
+```
+
+
+### Box Plots of the Data
+
+Boxplots are constructed to understand the distribution of the data within each of the quality scores available. Few Observations:
+
+* Fixed acidity, Citric Acid, Alcohol and Sulphates seem to have a increasing linear relationship with the quality
+* Volatile acidity, pH and Density seem to have decreasing linear relationship with the quality
+* Free and Total Sulphur-di-oxides seem to follow the same trend as the counts of the quality.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.width=10, fig.height=5}
+
+NumVar <- NumVar[NumVar!="quality"]
+DataMain$quality <- as.factor(DataMain$quality)
+Variables2 <- c("b1","b2","b3","b4","b5","b6","b7","b8","b9","b10","b11")
+for(i in 1:length(NumVar)){
+  eval(parse(text = paste0(Variables2[i]," <- ggplot(DataMain, aes(y=",NumVar[i],",x = quality))+ 
+                           geom_boxplot(aes(fill = quality))+ guides(fill=FALSE)")))  
+}
+
+multiplot(b1, b2, b3, b4,b5,b6, cols=3)
+multiplot(b7, b8, b9, b10,b11, cols=3)
+```
+
+
+## Plots to investigate the relation between Alchohol, Density and Residual sugar with Quality of Wine
+
+### Means plots
+
+The means of the above given variables are calculated within each quality score and are the plots are given below
+
+* Density almost has a decreasing linear relationship with quality.
+* Residual sugar doesn't seem to have any linear relationship with quality. It appears to have a unusual Sine/Cosine realtion with the quality
+* Alcohol clearly has a linear relationship with the quality.
+
+```{r,echo=FALSE, message = FALSE, warning=FALSE}
+
+DataMain <- fread("winequality-red.csv")
+
+DataMainMeans <- DataMain[,list(residual_sugar =mean(residual_sugar), alcohol = mean(alcohol),
+                                density = mean(density)),
+                          by =list(quality)]
+
+s1 <- ggplot(DataMainMeans, aes(quality, density)) + geom_point(size = 4, alpha = 0.6, color = "blue") + stat_smooth()
+s2 <- ggplot(DataMainMeans, aes(quality, residual_sugar)) + geom_point(size = 4, alpha = 0.6, color = "blue") + stat_smooth()
+s3 <- ggplot(DataMainMeans, aes(quality, alcohol)) + geom_point(size = 4, alpha = 0.6, color = "blue") + stat_smooth()
+
+multiplot(s1,s2,s3,cols = 1)
+```
+
+
+Combining them together:
+
+Plotting Alchol on X-Axis, Density on Y-Axis faceted by the quality and color of the point indicates the severity of Residual Sugar.
+
+* The color seem to be same across the plot indicating the residual sugar has very less variation.
+* As the plot comes down, the points move much lower indicating the decreasing relationship between density and to the right indicating the increasing relationship with the alcohol.
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+DataMainMeans$quality <- as.factor(DataMainMeans$quality)
+
+m <- ggplot(DataMainMeans, aes(alcohol, density))
+m + geom_point(aes(fill = residual_sugar), size= 3, alpha = 0.6) + facet_grid(quality~.)
+
+```
+
+
+### Actual data plots
+
+Till now, we have investigated the means. Most of the times, means do not indicate the actual distribution of the data because of the outliers. So, lets look at the actual data and their distributions with the change in the variables.
+
+Alcohol vs Density
+
+* We can see that as we come down the plot, the lower and move towards right which is similar to the means plot given above.
+* We can see that the datapoints are spread across the different alcohol content for the quality scores of 5 and 6.
+* Within each score, we can see a decreasing relationship between alcohol and density which is expected since alcohol has a density of **0.78** and it dilutes the density as its percentage increases
+* In summary we can say that Alcohol is having a increasing linear relationship and density is having the devreasing linear relationship with the quality.
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+DataMain$quality <- as.factor(DataMain$quality)
+
+ggplot(DataMain, aes(alcohol, density)) + geom_point(aes(color = quality),size =3, alpha = 0.6) + facet_grid(quality~.)+stat_smooth()
+
+```
+
+Alcohol vs Residual Sugar
+
+* Residual Sugar doesn't seem to have any effect on the quality of the wine.
+* Observing the distributions of residual sugar in the plot it is evident that, most of the points fall below 5 across all the quality scores.
+* Quality scores 5 and 6 seem to have a broader distribution with respect to the residual sugar.
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+
+m <- ggplot(DataMain, aes(alcohol, residual_sugar)) + geom_point(aes(color = quality),size =3, alpha = 0.6) + facet_grid(quality~.)+stat_smooth()
+
+ggplotly(m)
+
+```
+
+Density vs Residual Sugar
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+
+ggplot(DataMain, aes(density, residual_sugar)) + geom_point(aes(color = quality),size =3, alpha = 0.6) + facet_grid(quality~.)+stat_smooth()
+
+```
+
+## Modeling
+
+This can be approached in two ways:
+
+* Treating Quality as Continuous Variable : Regression Problem
+* Treating Quality as Categorical Variable : Classification Problem
+
+### Treating it as a regression problem
+
+```{r}
+DataMain <- fread("winequality-red.csv")
+DataMain2 <- copy(DataMain)
+
+splits <- splitdf(DataMain2, seed = 400, perc = 0.75)
+DtTrain <- splits[[1]]
+DtTest <- splits[[2]]
+
+lmmodel <- lm(quality~., data = DtTrain)
+summary(lmmodel)
+```
+
+VIF Table for this model: We can see that fixed_acidity and density are having the highest VIF values
+
+```{r, echo=FALSE}
+
+vifvalues <- vif(lmmodel)
+LinearDf <- data.frame()
+counts <- 1
+
+for(i in 1:length(lmmodel$coefficients)){
+  LinearDf[counts, "Variable"] <- names(lmmodel$coefficients)[i]
+  LinearDf[counts, "Coefficient"] <- summary(lmmodel)$coefficients[i,1]
+  LinearDf[counts, "Std.Error"] <- summary(lmmodel)$coefficients[i,2]
+  LinearDf[counts, "t-value"] <- summary(lmmodel)$coefficients[i,3]
+  LinearDf[counts, "p-value"] <- summary(lmmodel)$coefficients[i,4]
+  if(names(lmmodel$coefficients)[i] == "(Intercept)"){
+    LinearDf[counts, "VIF"] <- 0
+  }else{
+    LinearDf[counts, "VIF"] <- vifvalues[i-1]
+  }
+  counts <- counts +1
+}
+
+kable(LinearDf, caption = "VIF Table")
+
+```
+
+Correlation Matrix
+
+```{r, echo= TRUE}
+w <- cor(DataMain)
+corrplot(w, method = "number", number.cex=0.75, order = "AOE")
+```
+
+
+So from above analysis, We can take the following actions:
+
+* Exclude the density and fixed_acidity because of VIF values.
+* Remove Citric Acid and Residual Sugar (They were not significant in the model)
+* Free sulpfur dioxide is heavily correlated to the Total sulfur-di-oxide, and since the later is more correlated to the quality we drop the former variable.
+
+Removing the above variables and running the model gives the following output.
+
+```{r, echo=TRUE}
+colstodelete <- c("fixed_acidity", "density", "citric_acid","residual_sugar","free_sulfur_dioxide")
+DataMain2[,(colstodelete):=NULL,]
+
+splits <- splitdf(DataMain2, seed = 400, perc = 0.75)
+DtTrain <- splits[[1]]
+DtTest <- splits[[2]]
+
+lmmodel <- lm(quality~., data = DtTrain)
+summary(lmmodel)
+
+```
+
+We will use Studentized Residuals to find and delete the outliers. Observing the distribution we can see that there are values beyond the 3rd quantile on each end. So we can consider them as outliers
+
+```{r, echo=TRUE}
+
+StudRes <- studres(lmmodel)
+hist(StudRes)
+
+```
+
+
+Removing the values not falling in the interval [-3,3] and reconstructing the model gives the following.
+
+```{r, echo=TRUE}
+
+DtTrain <- cbind(DtTrain, StudRes)
+DtTrain<- DtTrain[StudRes < 3 & StudRes > -3,,]
+DtTrain[,StudRes:=NULL,]
+
+lmmodel <- lm(quality~., data = DtTrain)
+summary(lmmodel)
+
+```
+
+We can see that the R-squared value increased. We can test out the accuracy using Confusion matrix by rounding off the values to the nearest integer. Testing out in this way is convinient because we can compare it with the classification results.
+
+```{r, echo=TRUE,warning=FALSE}
+preds <- predict(lmmodel, newdata = DtTest)
+preds <- round(preds)
+confusionMatrix(preds, DtTest$quality)
+```
+
+So we stand at 60% accuarate model. Futher steps can be:
+
+* Using transformations on DV and IDV. Since the IDV values are not very large this will not have much effect. Doing this will just complicate the model with no increase in accuracy.
+
+
+### Classification Problem
+
+We can consider this as a classfication problem. We have 6 classes to classify into. We can use tree based models (Decision Trees, Conditional Inference trees, Random Forests and Boosting methods). XGBoost (A variant of ensemble technique) offers a very good framework for the classfication and known to give better results compared to the other tree based methods. So, we will go with the boosting technique.
+
+```{r, echo=TRUE, warning=FALSE}
+
+DataMain3 <- copy(DataMain)
+DataMain3$quality <- as.factor(DataMain3$quality)
+
+splits <- splitdf(DataMain3, seed = 400, perc = 0.75)
+DtTrain <- splits[[1]]
+DtTest <- splits[[2]]
+
+param <- list("objective" = "multi:softmax",    # multiclass classification 
+              "num_class" = 6,    # number of classes 
+              "max.depth"= 6, #Maximum depth of a tree
+              "eta" = 0.03,    # step size shrinkage 
+              "gamma" = 0,    # minimum loss reduction 
+              "subsample" = 1,    # part of data instances to grow tree 
+              "min_child_weight" = 12  # minimum sum of instance weight needed in a child 
+)
+
+
+DfMat <- DtTrain
+y <- as.matrix(as.integer(DfMat$quality)-1)
+DfMat$quality <- NULL
+DfMat <- as.matrix(DfMat)
+mode(DfMat) <- "numeric"
+
+bst2 <- xgboost(param=param, data=DfMat, label=y,nrounds = 200, verbose=0)
+
+DfMatTest <- DtTest
+ytest <- as.matrix(as.integer(DfMatTest$quality)-1)
+DfMatTest$quality <- NULL
+DfMatTest <- as.matrix(DfMatTest)
+mode(DfMat) <- "numeric"
+
+PredsTest <- predict(bst2,DfMatTest)
+confusionMatrix(PredsTest+3, factor(ytest+3) )
+
+```
+
+We stand at a 66% accurate model. After fine tuning the parameters to avoid overfitting and fine tuning the results we stand at this accuracy, which is better compared to all the other tree based methods.
+
+Getting the variable importance plot from Boosting:
+
+* We can see that most of the variables which are falling into higher importance are also obtained while using the Regression model.
+
+* Citric Acid is an exception here which has higher significance value associated to it compared to the Regression model where the variable was not significant at all.
+
+```{r, echo=TRUE}
+
+mode_dump<- xgb.dump(bst2, with.stats=TRUE)
+names <- dimnames(DfMat)[[2]]
+importance_matrix <- xgb.importance(names, model=bst2)
+gp <- xgb.plot.importance(importance_matrix)
+print(gp)
+
+```
+
+## Conclusion
+
+We can see that treating that problem as regression problem gives us an accuracy of **60%** and whereas treating the problem as Classification problem gives us **66%**. The possible conclusions are given below:
+
+* The physiochemical properties are clearly not sufficient enough to tell the quality of wine efficiently
+* We require more data regarding the flavour, Age of the wine, Contents of wine etc to obtain a better model  
+  
+  
+  
+  
+
+
+
+
+
+
+
+
+
+
